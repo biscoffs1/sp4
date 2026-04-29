@@ -1218,6 +1218,7 @@
                 }
             });
 
+            moveSelect.onclick = (e) => e.stopPropagation();
             moveSelect.onchange = (e) => {
                 const targetPath = e.target.value;
                 let selection = shortcutSelections.get(key);
@@ -1993,6 +1994,39 @@
             projectFolders.sort((a, b) => a.name.localeCompare(b.name));
             allProjectFolders = projectFolders;
 
+            if (g_rootHandle && g_rootHandle !== currentDirHandle) {
+                // If we have a root handle that is different from currentDirHandle,
+                // we should also scan it for other project folders to populate the move-to dropdown.
+                const rootProjectFolders = [];
+                async function findRootProjectFolders(dirHandle, currentPath = '') {
+                    for await (const entry of dirHandle.values()) {
+                        if (entry.kind === 'directory') {
+                            const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
+                            try {
+                                await findDirectoryHandleByName(entry, 'Edit Thumbnails');
+                                rootProjectFolders.push({
+                                    handle: entry,
+                                    path: newPath,
+                                    name: entry.name
+                                });
+                            } catch (e) {
+                                await findRootProjectFolders(entry, newPath);
+                            }
+                        }
+                    }
+                }
+                await findRootProjectFolders(g_rootHandle, '');
+
+                // Merge unique projects based on path
+                const existingPaths = new Set(allProjectFolders.map(p => p.path));
+                rootProjectFolders.forEach(p => {
+                    if (!existingPaths.has(p.path)) {
+                        allProjectFolders.push(p);
+                    }
+                });
+                allProjectFolders.sort((a, b) => a.name.localeCompare(b.name));
+            }
+
             let isProject = false;
             try {
                 await findDirectoryHandleByName(currentDirHandle, 'Edit Thumbnails');
@@ -2357,7 +2391,7 @@
 
                     rowDiv.addEventListener('click', (e) => {
                         // If a button was clicked, don't trigger play
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input')) {
+                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector')) {
                             return;
                         }
                         const key = project.path + '|' + videoFile.name;
@@ -2537,7 +2571,7 @@
                              let videoFile;
                              rowDiv.addEventListener('click', async (e) => {
                                 // If a button was clicked, don't trigger play
-                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input')) {
+                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector')) {
                                     return;
                                 }
                                 if (!videoFile) {
@@ -2865,7 +2899,7 @@
                     };
 
                     rowDiv.addEventListener('click', async (e) => {
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn')) {
+                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn') || e.target.closest('.move-to-selector')) {
                             return;
                         }
                         const video = candidateVideos[currentIndex];
