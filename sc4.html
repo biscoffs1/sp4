@@ -1387,7 +1387,7 @@
                 '        if (Test-Path -LiteralPath \$filePath) { Remove-Item -LiteralPath \$filePath }',
                 '    } else {',
                 '        \$content = @()',
-                '        foreach (\$key in \$data.Keys) { \$content += "\$key:\$(\$data[\$key])" }',
+                '        foreach (\$key in \$data.Keys) { \$content += ("{0}:{1}" -f \$key, \$data[\$key]) }',
                 '        \$content | Out-File -FilePath \$filePath -Encoding utf8',
                 '    }',
                 '}',
