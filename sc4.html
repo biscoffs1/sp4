@@ -1409,7 +1409,7 @@
                     if (escapedSubfolder) sourceVideoPathVar = `(Join-Path -Path ${sourceVideoPathVar} -ChildPath '${escapedSubfolder}')`;
                     scriptLines.push(`\$sourceVideoPath = Join-Path -Path ${sourceVideoPathVar} -ChildPath '${escapedVideoName}'`);
 
-                    let targetVideoPathVar = `Join-Path -Path \$PSScriptRoot -ChildPath '${escapedTargetProjectPath}'`;
+                    let targetVideoPathVar = `(Join-Path -Path \$PSScriptRoot -ChildPath '${escapedTargetProjectPath}')`;
                     scriptLines.push(`\$targetVideoPath = Join-Path -Path ${targetVideoPathVar} -ChildPath '${escapedVideoName}'`);
 
                     scriptLines.push('if (Test-Path -LiteralPath \$sourceVideoPath) {');
