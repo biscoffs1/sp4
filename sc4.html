@@ -1466,7 +1466,7 @@
                 if (sel.type === 'delete-sc') return false;
                 const key = sel.projectPath + '|' + sel.videoName;
                 const initial = initialShortcutSelections.get(key);
-                return !initial || initial.type !== sel.type;
+                return !initial || initial.type !== sel.type || sel.targetProject;
             });
 
             if (hasCreations) {
@@ -1516,8 +1516,8 @@
             selectionsToProcess.forEach(sel => {
                 const key = sel.projectPath + '|' + sel.videoName;
                 const initial = initialShortcutSelections.get(key);
-                if (initial && initial.type === sel.type) {
-                    return; // Skip if unchanged
+                if (initial && initial.type === sel.type && !sel.targetProject) {
+                    return; // Skip if unchanged and not moved
                 }
                 
                 const selectionType = sel.type;
@@ -1805,11 +1805,11 @@
             scriptLines.push('Write-Host "Script execution complete."');
             scriptLines.push('Read-Host -Prompt "Press Enter to exit"');
 
-            const script = scriptLines.join('\r\n');
-            batchScriptTextArea.value = script;
-            const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
+            const scriptStr = scriptLines.join('\r\n');
+            batchScriptTextArea.value = scriptStr;
+            const blob = new Blob(['\ufeff', scriptStr], { type: 'application/octet-stream' });
             downloadScriptLink.href = URL.createObjectURL(blob);
-            downloadScriptLink.download = 'update_shortcuts.ps1';
+            downloadScriptLink.download = 'create_shortcuts.ps1';
         }
 
 
@@ -3197,10 +3197,10 @@
             scriptLines.push('Write-Host "Total items in playlist: \$(\$script:playlistContent.Count - 1)"');
             scriptLines.push('Read-Host -Prompt "Press Enter to exit"');
 
-            const script = scriptLines.join('\r\n');
-            batchScriptTextArea.value = script;
-            const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
-            downloadScriptLink.href = URL.createObjectURL(blob);
+            const scriptStrP = scriptLines.join('\r\n');
+            batchScriptTextArea.value = scriptStrP;
+            const blobP = new Blob(['\ufeff', scriptStrP], { type: 'application/octet-stream' });
+            downloadScriptLink.href = URL.createObjectURL(blobP);
             downloadScriptLink.download = 'create_playlist.ps1';
         }
 
