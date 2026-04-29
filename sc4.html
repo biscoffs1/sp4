@@ -1992,40 +1992,6 @@
             }
 
             projectFolders.sort((a, b) => a.name.localeCompare(b.name));
-            allProjectFolders = projectFolders;
-
-            if (g_rootHandle && g_rootHandle !== currentDirHandle) {
-                // If we have a root handle that is different from currentDirHandle,
-                // we should also scan it for other project folders to populate the move-to dropdown.
-                const rootProjectFolders = [];
-                async function findRootProjectFolders(dirHandle, currentPath = '') {
-                    for await (const entry of dirHandle.values()) {
-                        if (entry.kind === 'directory') {
-                            const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
-                            try {
-                                await findDirectoryHandleByName(entry, 'Edit Thumbnails');
-                                rootProjectFolders.push({
-                                    handle: entry,
-                                    path: newPath,
-                                    name: entry.name
-                                });
-                            } catch (e) {
-                                await findRootProjectFolders(entry, newPath);
-                            }
-                        }
-                    }
-                }
-                await findRootProjectFolders(g_rootHandle, '');
-
-                // Merge unique projects based on path
-                const existingPaths = new Set(allProjectFolders.map(p => p.path));
-                rootProjectFolders.forEach(p => {
-                    if (!existingPaths.has(p.path)) {
-                        allProjectFolders.push(p);
-                    }
-                });
-                allProjectFolders.sort((a, b) => a.name.localeCompare(b.name));
-            }
 
             let isProject = false;
             try {
@@ -2115,6 +2081,40 @@
                         console.warn(`Could not resolve path for ${project.name} relative to root.`);
                     }
                 }
+            }
+
+            allProjectFolders = [...projectFolders];
+            if (g_rootHandle && g_rootHandle !== currentDirHandle) {
+                // If we have a root handle that is different from currentDirHandle,
+                // we should also scan it for other project folders to populate the move-to dropdown.
+                const rootProjectFolders = [];
+                async function findRootProjectFolders(dirHandle, currentPath = '') {
+                    for await (const entry of dirHandle.values()) {
+                        if (entry.kind === 'directory') {
+                            const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
+                            try {
+                                await findDirectoryHandleByName(entry, 'Edit Thumbnails');
+                                rootProjectFolders.push({
+                                    handle: entry,
+                                    path: newPath,
+                                    name: entry.name
+                                });
+                            } catch (e) {
+                                await findRootProjectFolders(entry, newPath);
+                            }
+                        }
+                    }
+                }
+                await findRootProjectFolders(g_rootHandle, '');
+
+                // Merge unique projects based on path
+                const existingPaths = new Set(allProjectFolders.map(p => p.path));
+                rootProjectFolders.forEach(p => {
+                    if (!existingPaths.has(p.path)) {
+                        allProjectFolders.push(p);
+                    }
+                });
+                allProjectFolders.sort((a, b) => a.name.localeCompare(b.name));
             }
 
             const allImageLoadPromises = [];
