@@ -1370,6 +1370,27 @@
             let scriptLines = [
                 '\$PSScriptRoot = Split-Path -Parent -Path \$MyInvocation.MyCommand.Definition',
                 '\$wshell = New-Object -ComObject WScript.Shell',
+                '',
+                'function Update-RotationData {',
+                '    param([string]\$filePath, [hashtable]\$toAdd, [string[]]\$toRemove)',
+                '    \$data = @{}',
+                '    if (Test-Path -LiteralPath \$filePath) {',
+                '        Get-Content -LiteralPath \$filePath | ForEach-Object {',
+                '            if (\$_ -match "^(.*?):(\\d+)$") {',
+                '                \$data[\$matches[1]] = \$matches[2]',
+                '            }',
+                '        }',
+                '    }',
+                '    foreach (\$key in \$toRemove) { \$data.Remove(\$key) }',
+                '    foreach (\$key in \$toAdd.Keys) { \$data[\$key] = \$toAdd[\$key] }',
+                '    if (\$data.Count -eq 0) {',
+                '        if (Test-Path -LiteralPath \$filePath) { Remove-Item -LiteralPath \$filePath }',
+                '    } else {',
+                '        \$content = @()',
+                '        foreach (\$key in \$data.Keys) { \$content += "\$key:\$(\$data[\$key])" }',
+                '        \$content | Out-File -FilePath \$filePath -Encoding utf8',
+                '    }',
+                '}',
                 ''
             ];
 
@@ -1639,56 +1660,60 @@
             }
 
             // --- Rotation Data ---
-            const rotationByProject = new Map();
+            const rotationUpdates = new Map(); // projectPath -> { toAdd: {}, toRemove: [] }
+
+            const getUpdate = (proj) => {
+                if (!rotationUpdates.has(proj)) {
+                    rotationUpdates.set(proj, { toAdd: {}, toRemove: [] });
+                }
+                return rotationUpdates.get(proj);
+            };
+
             shortcutSelections.forEach((sel, key) => {
-                const project = sel.targetProject ? sel.targetProject : sel.projectPath;
-                if (sel.rotation && sel.rotation !== "0") {
-                    if (!rotationByProject.has(project)) {
-                        rotationByProject.set(project, []);
-                    }
-                    rotationByProject.get(project).push(`${sel.videoName}:${sel.rotation}`);
-                }
+                const initial = initialShortcutSelections.get(key);
+                const isMoved = sel.targetProject && sel.targetProject !== sel.projectPath;
 
-                // If moved, also ensure the old project is marked for update to remove rotation
-                if (sel.targetProject && sel.projectPath !== sel.targetProject) {
-                    if (!rotationByProject.has(sel.projectPath)) {
-                        rotationByProject.set(sel.projectPath, []);
+                if (isMoved) {
+                    // Remove from source
+                    getUpdate(sel.projectPath).toRemove.push(sel.videoName);
+                    // Add/Update in destination
+                    const rotation = sel.rotation && sel.rotation !== "0" ? sel.rotation : (initial ? initial.rotation : "0");
+                    if (rotation && rotation !== "0") {
+                        getUpdate(sel.targetProject).toAdd[sel.videoName] = rotation;
+                    }
+                } else {
+                    // Not moved, check if rotation changed
+                    const currentRot = sel.rotation || "0";
+                    const initialRot = (initial && initial.rotation) || "0";
+                    if (currentRot !== initialRot) {
+                        if (currentRot === "0") {
+                            getUpdate(sel.projectPath).toRemove.push(sel.videoName);
+                        } else {
+                            getUpdate(sel.projectPath).toAdd[sel.videoName] = currentRot;
+                        }
                     }
                 }
             });
 
-            // Also check initial selections that might have been cleared
-            initialShortcutSelections.forEach((initial, key) => {
-                const parts = key.split('|');
-                const projectPath = parts[0];
-                const videoName = parts[1];
-                const current = shortcutSelections.get(key);
-                if (initial.rotation && initial.rotation !== "0" && (!current || current.rotation === "0")) {
-                     // This rotation was cleared. We need to make sure the project is processed to update rotation_data.txt
-                     if (!rotationByProject.has(projectPath)) {
-                        rotationByProject.set(projectPath, []);
-                     }
-                }
-            });
-
-            if (rotationByProject.size > 0) {
+            if (rotationUpdates.size > 0) {
                 scriptLines.push('# --- Updating Rotation Data ---');
-                rotationByProject.forEach((rotations, projectPath) => {
+                rotationUpdates.forEach((update, projectPath) => {
                     const escapedProjectPath = escapePSString(projectPath);
                     const projectPathVar = escapedProjectPath ? `(Join-Path -Path \$PSScriptRoot -ChildPath '${escapedProjectPath}')` : '\$PSScriptRoot';
                     const rotationFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'rotation_data.txt')`;
                     
-                    if (rotations.length === 0) {
-                        scriptLines.push(`if (Test-Path -LiteralPath ${rotationFileVar}) { Remove-Item -LiteralPath ${rotationFileVar}; Write-Host "Removed rotation_data.txt for ${escapedProjectPath}" }`);
-                    } else {
-                        scriptLines.push('\$rotContent = @(');
-                        rotations.forEach(rot => {
-                            scriptLines.push(`    '${escapePSString(rot)}'`);
-                        });
-                        scriptLines.push(')');
-                        scriptLines.push(`\$rotContent | Out-File -FilePath ${rotationFileVar} -Encoding utf8`);
-                        scriptLines.push(`Write-Host "Updated rotation_data.txt for ${escapedProjectPath}"`);
+                    scriptLines.push(`\$toAdd = @{`);
+                    for (const [vName, rot] of Object.entries(update.toAdd)) {
+                        scriptLines.push(`    '${escapePSString(vName)}' = '${rot}'`);
                     }
+                    scriptLines.push(`}`);
+                    scriptLines.push(`\$toRemove = @(`);
+                    update.toRemove.forEach(vName => {
+                        scriptLines.push(`    '${escapePSString(vName)}'`);
+                    });
+                    scriptLines.push(`)`);
+                    scriptLines.push(`Update-RotationData -filePath ${rotationFileVar} -toAdd \$toAdd -toRemove \$toRemove`);
+                    scriptLines.push(`Write-Host "Surgically updated rotation_data.txt for ${escapedProjectPath || '(Root)'}"`);
                 });
                 scriptLines.push('');
 
