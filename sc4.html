@@ -1405,7 +1405,7 @@
                 '    \$data = @{}',
                 '    if (Test-Path -LiteralPath \$filePath) {',
                 '        Get-Content -LiteralPath \$filePath | ForEach-Object {',
-                '            if (\$_ -match "^(.*?):(\\d+)$") {',
+                '            if (\$_ -match "^(.*?):(.*)$") {',
                 '                \$data[\$matches[1]] = \$matches[2]',
                 '            }',
                 '        }',
@@ -1704,23 +1704,29 @@
                 const initial = initialShortcutSelections.get(key);
                 const isMoved = sel.targetProject && sel.targetProject !== sel.projectPath;
 
+                const currentRot = sel.rotation || "0";
+                const initialRot = (initial && initial.rotation) || "0";
+                const currentFlipped = !!sel.flipped;
+                const initialFlipped = initial ? !!initial.flipped : false;
+
+                const getVal = (r, f) => (f ? `${r}:flip` : r);
+
                 if (isMoved) {
                     // Remove from source
                     getUpdate(sel.projectPath).toRemove.push(sel.videoName);
                     // Add/Update in destination
-                    const rotation = sel.rotation && sel.rotation !== "0" ? sel.rotation : (initial ? initial.rotation : "0");
-                    if (rotation && rotation !== "0") {
-                        getUpdate(sel.targetProject).toAdd[sel.videoName] = rotation;
+                    const rotationVal = getVal(currentRot, currentFlipped);
+                    if (rotationVal !== "0") {
+                        getUpdate(sel.targetProject).toAdd[sel.videoName] = rotationVal;
                     }
                 } else {
-                    // Not moved, check if rotation changed
-                    const currentRot = sel.rotation || "0";
-                    const initialRot = (initial && initial.rotation) || "0";
-                    if (currentRot !== initialRot) {
-                        if (currentRot === "0") {
+                    // Not moved, check if rotation or flip changed
+                    if (currentRot !== initialRot || currentFlipped !== initialFlipped) {
+                        const rotationVal = getVal(currentRot, currentFlipped);
+                        if (rotationVal === "0") {
                             getUpdate(sel.projectPath).toRemove.push(sel.videoName);
                         } else {
-                            getUpdate(sel.projectPath).toAdd[sel.videoName] = currentRot;
+                            getUpdate(sel.projectPath).toAdd[sel.videoName] = rotationVal;
                         }
                     }
                 }
@@ -1921,8 +1927,11 @@
                 const text = await file.text();
                 text.split('\n').forEach(line => {
                     const parts = line.trim().split(':');
-                    if (parts.length === 2) {
-                        rotationMap.set(parts[0].trim().toLowerCase(), parts[1].trim());
+                    if (parts.length >= 2) {
+                        const videoName = parts[0].trim().toLowerCase();
+                        const rotationValue = parts[1].trim();
+                        const isFlipped = parts.length > 2 && parts[2].trim().toLowerCase() === 'flip';
+                        rotationMap.set(videoName, { rotation: rotationValue, flipped: isFlipped });
                     }
                 });
             } catch (e) {}
@@ -2480,19 +2489,22 @@
                         else if (hasRootSc) initialShortcutType = 'root-sc';
                     }
 
-                    const rotation = projectRotationData.get(videoFile.name.toLowerCase()) || "0";
+                    const rotData = projectRotationData.get(videoFile.name.toLowerCase()) || { rotation: "0", flipped: false };
+                    const rotation = rotData.rotation;
+                    const flipped = rotData.flipped;
 
-                    if ((initialShortcutType || rotation !== "0") && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') {
+                    if ((initialShortcutType || rotation !== "0" || flipped) && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') {
                         const key = project.path + '|' + videoFile.name;
                         const selectionData = { 
                             videoName: videoFile.name, 
                             projectPath: project.path,
                             subfolder: videoFile.subfolder,
                             type: initialShortcutType || '',
-                            rotation: rotation
+                            rotation: rotation,
+                            flipped: flipped
                         };
                         shortcutSelections.set(key, selectionData);
-                        initialShortcutSelections.set(key, { type: initialShortcutType, rotation: rotation });
+                        initialShortcutSelections.set(key, { type: initialShortcutType, rotation: rotation, flipped: flipped });
                     }
 
                     canvasElements.push(rowDiv);
@@ -2521,6 +2533,9 @@
                         }
                         if (rotation !== "0") {
                             img.classList.add('rotate-' + rotation);
+                        }
+                        if (flipped) {
+                            img.classList.add('flipped');
                         }
                         wrapper.appendChild(img);
                         thumbnailsContainer.appendChild(wrapper);
@@ -2644,17 +2659,21 @@
                             dateInfo.textContent = `Created: ${videoDate}`;
                             rowDiv.appendChild(dateInfo);
 
-                            const rotation = projectRotationData.get(videoBaseName.toLowerCase()) || "0";
-                            if (rotation !== "0") {
+                            const rotData = projectRotationData.get(videoBaseName.toLowerCase()) || { rotation: "0", flipped: false };
+                            const rotation = rotData.rotation;
+                            const flipped = rotData.flipped;
+
+                            if (rotation !== "0" || flipped) {
                                 const key = subfolderName + '|' + videoBaseName;
                                 if (!shortcutSelections.has(key)) {
                                     shortcutSelections.set(key, {
                                         videoName: videoBaseName,
                                         projectPath: subfolderName,
                                         type: 'subfolder-sc', // default for sc-new
-                                        rotation: rotation
+                                        rotation: rotation,
+                                        flipped: flipped
                                     });
-                                    initialShortcutSelections.set(key, { type: 'subfolder-sc', rotation: rotation });
+                                    initialShortcutSelections.set(key, { type: 'subfolder-sc', rotation: rotation, flipped: flipped });
                                 }
                             }
 
@@ -2710,6 +2729,9 @@
                                 img.dataset.fileName = file.name;
                                 if (rotation !== "0") {
                                     img.classList.add('rotate-' + rotation);
+                                }
+                                if (flipped) {
+                                    img.classList.add('flipped');
                                 }
                                 wrapper.appendChild(img);
                                 thumbnailsContainer.appendChild(wrapper);
