@@ -627,6 +627,7 @@
 
         let allVideoFiles = [];
         let allProjectFolders = [];
+        const skipDirs = new Set(['edit thumbnails', 'thumbnails', 'sc', '.git', 'node_modules', 'recovery', '$recycle.bin', 'system volume information']);
         let shortcutSelections = new Map(); // Key: projectPath + '|' + videoName, Value: { videoName, projectPath, subfolder, type, rotation }
         let initialShortcutSelections = new Map(); // Key: projectPath + '|' + videoName, Value: { type, rotation }
         let currentDirHandle;
@@ -1959,7 +1960,6 @@
                     text.split('\n').map(normalizeLine).filter(l => l).forEach(s => allShortcuts.add(s));
                 } catch (e) {}
 
-                const skipDirs = new Set(['sc', 'edit thumbnails', 'thumbnails', '.git', 'node_modules', 'recovery']);
                 for await (const entry of dirHandle.values()) {
                     if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                         await scanDir(entry);
@@ -2081,7 +2081,7 @@
 
             async function findProjectFolders(dirHandle, currentPath = '') {
                  for await (const entry of dirHandle.values()) {
-                    if (entry.kind === 'directory') {
+                    if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                         const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
                         try {
                             await findDirectoryHandleByName(entry, 'Edit Thumbnails');
@@ -2220,7 +2220,6 @@
                 // we should also scan it for other project folders to populate the move-to dropdown.
                 const rootProjectFolders = [];
                 async function findRootProjectFolders(dirHandle, currentPath = '') {
-                    const skipDirs = new Set(['sc', 'edit thumbnails', 'thumbnails', '.git', 'node_modules', 'recovery']);
                     for await (const entry of dirHandle.values()) {
                         if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                             const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
@@ -2252,6 +2251,7 @@
             console.log(`Starting to process ${projectFolders.length} project folders...`);
             const allImageLoadPromises = [];
             let processedProjects = 0;
+            let firstCanvasRendered = false;
             for (const project of projectFolders) {
                 try {
                     console.log(`Processing project: ${project.name} (Path: ${project.path})`);
@@ -2273,15 +2273,18 @@
                     const projectVideoFiles = [];
                     // Recursively find videos in subfolders
                     async function findVideos(dirHandle, subfolder = '') {
-                        const skipDirs = new Set(['edit thumbnails', 'thumbnails', 'sc', '.git', 'node_modules', 'recovery']);
                         for await (const entry of dirHandle.values()) {
                             if (entry.kind === 'file' && entry.name.match(/\.(mp4|avi|mov|mkv)$/i)) {
-                                const file = await entry.getFile();
-                                if (!isNewOnly || file.lastModified > mostRecentShortcutTime) {
-                                    // Store additional path info on the file object
-                                    file.subfolder = subfolder;
-                                    file.projectPath = project.path;
-                                    projectVideoFiles.push(file);
+                                try {
+                                    const file = await entry.getFile();
+                                    if (!isNewOnly || file.lastModified > mostRecentShortcutTime) {
+                                        // Store additional path info on the file object
+                                        file.subfolder = subfolder;
+                                        file.projectPath = project.path;
+                                        projectVideoFiles.push(file);
+                                    }
+                                } catch (fileErr) {
+                                    console.warn(`Could not get file for ${entry.name}:`, fileErr);
                                 }
                             } else if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                                 await findVideos(entry, subfolder ? `${subfolder}\\${entry.name}` : entry.name);
@@ -2531,17 +2534,22 @@
                         canvases.set(canvasId, { id: canvasId, name: project.name, elements: canvasElements, path: project.path });
                     }
                     processedProjects++;
+                    if (!firstCanvasRendered && canvases.size > 0) {
+                        renderCanvas(canvases.keys().next().value);
+                        firstCanvasRendered = true;
+                    }
                     if (processedProjects % 5 === 0 || processedProjects === projectFolders.length) {
                         console.log(`Processed ${processedProjects}/${projectFolders.length} projects...`);
+                        await new Promise(r => setTimeout(r, 0)); // Yield to main thread
                     }
                 } catch (err) {
                     console.error(`Error processing project ${project.name}:`, err);
                 }
             }
-            // Start rendering the first canvas as soon as processing is done
-            if (canvases.size > 0) {
+            // Final render check in case no canvas was rendered yet
+            if (canvases.size > 0 && !firstCanvasRendered) {
                 renderCanvas(canvases.keys().next().value);
-            } else {
+            } else if (canvases.size === 0) {
                 populateCanvasDropdown(); // Ensure dropdown is cleared if no projects found
                 thumbnailContainer.innerHTML = ''; // Clear display area
             }
