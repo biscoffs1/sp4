@@ -214,6 +214,9 @@
             outline: 3px dashed green;
             outline-offset: -3px;
         }
+        .flipped {
+            transform: scaleX(-1);
+        }
         .rotate-90 {
             transform: translate(-50%, -50%) rotate(90deg);
         }
@@ -222,6 +225,15 @@
         }
         .rotate-270 {
             transform: translate(-50%, -50%) rotate(270deg);
+        }
+        .rotate-90.flipped {
+            transform: translate(-50%, -50%) rotate(90deg) scaleX(-1);
+        }
+        .rotate-180.flipped {
+            transform: translate(-50%, -50%) rotate(180deg) scaleX(-1);
+        }
+        .rotate-270.flipped {
+            transform: translate(-50%, -50%) rotate(270deg) scaleX(-1);
         }
         #player.rotate-90 {
             transform: rotate(90deg);
@@ -1029,7 +1041,7 @@
             // Deprecated - row action bars handle their own active states
         }
 
-        function playVideo(file, rotation) {
+        function playVideo(file, rotation, flipped = false) {
             if (currentVideoUrl) {
                 URL.revokeObjectURL(currentVideoUrl);
             }
@@ -1042,16 +1054,18 @@
             player.style.maxWidth = '90vw';
             player.style.maxHeight = '90vh';
 
+            let transform = '';
             if (rotation !== "0") {
-                player.style.transform = `rotate(${rotation}deg)`;
+                transform += `rotate(${rotation}deg) `;
                 if (rotation === "90" || rotation === "270") {
-                    // When rotated 90/270, the width and height effectively swap.
-                    // We must ensure the rotated width (original height) fits in 90vw
-                    // and the rotated height (original width) fits in 90vh.
                     player.style.maxWidth = '90vh';
                     player.style.maxHeight = '90vw';
                 }
             }
+            if (flipped) {
+                transform += 'scaleX(-1) ';
+            }
+            player.style.transform = transform.trim();
             videoModal.style.display = 'flex';
             player.play();
         }
@@ -1099,15 +1113,19 @@
             const selection = shortcutSelections.get(key);
             const type = selection ? selection.type : '';
             const rotation = selection ? selection.rotation : "0";
+            const flipped = selection ? !!selection.flipped : false;
 
             rowDiv.querySelectorAll('.thumbnail').forEach(t => {
-                t.classList.remove('selected-root-sc', 'selected-subfolder-sc', 'selected-both-sc', 'selected-delete-sc', 'selected-playlist-sc', 'selected-shortcut');
+                t.classList.remove('selected-root-sc', 'selected-subfolder-sc', 'selected-both-sc', 'selected-delete-sc', 'selected-playlist-sc', 'selected-shortcut', 'flipped');
                 t.classList.remove('rotate-90', 'rotate-180', 'rotate-270');
                 if (type) {
                     t.classList.add('selected-' + type);
                 }
                 if (rotation !== "0") {
                     t.classList.add('rotate-' + rotation);
+                }
+                if (flipped) {
+                    t.classList.add('flipped');
                 }
             });
 
@@ -1197,6 +1215,17 @@
             leftGroup.appendChild(createBtn('Subfolder', () => setType('subfolder-sc'), 'subfolder-sc', '--subfolder-sc-color'));
             leftGroup.appendChild(createBtn('Root', () => setType('root-sc'), 'root-sc', '--root-sc-color'));
             leftGroup.appendChild(createBtn('Rotate 180°', () => rotate(180)));
+
+            const toggleFlip = () => {
+                let selection = shortcutSelections.get(key);
+                if (!selection) {
+                    selection = { videoName, projectPath, subfolder, type: '', rotation: "0", flipped: false };
+                    shortcutSelections.set(key, selection);
+                }
+                selection.flipped = !selection.flipped;
+                updateRowUI(rowDiv, videoName, projectPath);
+            };
+            leftGroup.appendChild(createBtn('H Flip', toggleFlip));
 
             const moveSelect = document.createElement('select');
             moveSelect.className = 'move-to-selector';
@@ -1529,8 +1558,10 @@
                 const escapedTargetProjectPath = sel.targetProject ? escapePSString(sel.targetProject) : null;
 
                 let targetPathConstruction = '\$PSScriptRoot';
-                if (escapedTargetProjectPath) {
-                    targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedTargetProjectPath}')`;
+                if (escapedTargetProjectPath !== null) {
+                    if (escapedTargetProjectPath !== '') {
+                        targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedTargetProjectPath}')`;
+                    }
                 } else {
                     if (escapedProjectPath) {
                         targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedProjectPath}')`;
@@ -1766,6 +1797,59 @@
                 scriptLines.push("    \$luaContent += 'end)'");
                 scriptLines.push('    \$luaContent | Out-File -FilePath \$luaPath -Encoding utf8');
                 scriptLines.push('    Write-Host "Updated MPV autorotate script at: \$luaPath"');
+                scriptLines.push('}');
+                scriptLines.push('');
+            }
+
+            // --- Update Central LUA Flip File ---
+            const flippedFiles = Array.from(shortcutSelections.values()).filter(sel => sel.flipped);
+            if (flippedFiles.length > 0) {
+                scriptLines.push('# --- Update Central LUA Flip File ---');
+                scriptLines.push("\$flipLuaPath = 'C:\\Bridge\\misc\\tools\\mpv-x86_64-v3-20260418-git-4377cce\\portable_config\\scripts\\flip.lua'");
+                scriptLines.push('\$script:flippedFiles = @{}');
+                flippedFiles.forEach(sel => {
+                    scriptLines.push(`\$script:flippedFiles['${escapePSString(sel.videoName)}'] = 'hflip'`);
+                });
+
+                scriptLines.push('\$allFlips = @{}');
+                scriptLines.push('if (Test-Path -LiteralPath \$flipLuaPath) {');
+                scriptLines.push('    \$existingFlipContent = Get-Content -LiteralPath \$flipLuaPath -Raw');
+                scriptLines.push('    if (\$existingFlipContent -match \'(?s)local flips = \\{(.*?)\\}\') {');
+                scriptLines.push('        \$innerFlip = \$matches[1]');
+                scriptLines.push('        \$flipEntries = \$innerFlip -split \',\'');
+                scriptLines.push('        foreach (\$fEntry in \$flipEntries) {');
+                scriptLines.push('            if (\$fEntry -match "\\[[\'\\"\" ]*(.*?)[\'\\"\" ]*\\]\\s*=\\s*[\'\\"\" ]*(.*?)[\'\\"\" ]*") {');
+                scriptLines.push('                \$allFlips[\$matches[1]] = \$matches[2]');
+                scriptLines.push('            }');
+                scriptLines.push('        }');
+                scriptLines.push('    }');
+                scriptLines.push('}');
+                scriptLines.push('foreach (\$fFile in \$script:flippedFiles.Keys) { \$allFlips[\$fFile] = \$script:flippedFiles[\$fFile] }');
+                scriptLines.push('if (\$allFlips.Count -gt 0) {');
+                scriptLines.push('    \$flipLuaDir = Split-Path -Parent \$flipLuaPath');
+                scriptLines.push('    if (-not (Test-Path -Path \$flipLuaDir)) { New-Item -ItemType Directory -Path \$flipLuaDir -Force | Out-Null }');
+                scriptLines.push('    \$flipLuaContent = @()');
+                scriptLines.push("    \$flipLuaContent += 'local flips = {'");
+                scriptLines.push('    foreach (\$fFile in \$allFlips.Keys) {');
+                scriptLines.push('        \$filter = \$allFlips[\$fFile]');
+                scriptLines.push("        \$escapedFFile = \$fFile.Replace(\"'\", \"\\\\'\")");
+                scriptLines.push("        \$flipLuaContent += \"    ['\$escapedFFile'] = '\$filter',\"");
+                scriptLines.push("    }");
+                scriptLines.push("    \$flipLuaContent += '}'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += 'mp.register_event(\"file-loaded\", function()'");
+                scriptLines.push("    \$flipLuaContent += '    local path = mp.get_property(\"path\")'");
+                scriptLines.push("    \$flipLuaContent += '    local filename = path:match(\"^.+[\\\\\\\\/](.+)\$\") or path'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += '    mp.command(\"vf remove @flip\")'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += '    if flips[filename] then'");
+                scriptLines.push("    \$flipLuaContent += '        local filter = flips[filename]'");
+                scriptLines.push("    \$flipLuaContent += '        mp.commandv(\"vf\", \"add\", \"@flip:\" .. filter)'");
+                scriptLines.push("    \$flipLuaContent += '    end'");
+                scriptLines.push("    \$flipLuaContent += 'end)'");
+                scriptLines.push('    \$flipLuaContent | Out-File -FilePath \$flipLuaPath -Encoding utf8');
+                scriptLines.push('    Write-Host "Updated MPV flip script at: \$flipLuaPath"');
                 scriptLines.push('}');
                 scriptLines.push('');
             }
@@ -2416,13 +2500,14 @@
 
                     rowDiv.addEventListener('click', (e) => {
                         // If a button was clicked, don't trigger play
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector')) {
+                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector') || e.target.closest('h3')) {
                             return;
                         }
                         const key = project.path + '|' + videoFile.name;
                         const selection = shortcutSelections.get(key);
                         const activeRotation = (selection && selection.rotation) ? selection.rotation : rotation;
-                        playVideo(videoFile, activeRotation);
+                        const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                        playVideo(videoFile, activeRotation, activeFlipped);
                     });
 
                     files.forEach(file => {
@@ -2596,7 +2681,7 @@
                              let videoFile;
                              rowDiv.addEventListener('click', async (e) => {
                                 // If a button was clicked, don't trigger play
-                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector')) {
+                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector') || e.target.closest('h3')) {
                                     return;
                                 }
                                 if (!videoFile) {
@@ -2611,7 +2696,8 @@
                                     const key = subfolderName + '|' + videoBaseName;
                                     const selection = shortcutSelections.get(key);
                                     const activeRotation = (selection && selection.rotation) ? selection.rotation : rotation;
-                                    playVideo(videoFile, activeRotation);
+                                    const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                                    playVideo(videoFile, activeRotation, activeFlipped);
                                 }
                             });
 
@@ -2924,7 +3010,7 @@
                     };
 
                     rowDiv.addEventListener('click', async (e) => {
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn') || e.target.closest('.move-to-selector')) {
+                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn') || e.target.closest('.move-to-selector') || e.target.closest('h3')) {
                             return;
                         }
                         const video = candidateVideos[currentIndex];
@@ -2932,7 +3018,8 @@
                         const key = project.path + '|playlist_entry';
                         const selection = shortcutSelections.get(key);
                         const activeRotation = (selection && selection.rotation) ? selection.rotation : "0";
-                        playVideo(videoFile, activeRotation);
+                        const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                        playVideo(videoFile, activeRotation, activeFlipped);
                     });
 
                     const rowHeader = document.createElement('h3');
