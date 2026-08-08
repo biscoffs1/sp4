@@ -214,6 +214,9 @@
             outline: 3px dashed green;
             outline-offset: -3px;
         }
+        .flipped {
+            transform: scaleX(-1);
+        }
         .rotate-90 {
             transform: translate(-50%, -50%) rotate(90deg);
         }
@@ -222,6 +225,15 @@
         }
         .rotate-270 {
             transform: translate(-50%, -50%) rotate(270deg);
+        }
+        .rotate-90.flipped {
+            transform: translate(-50%, -50%) rotate(90deg) scaleX(-1);
+        }
+        .rotate-180.flipped {
+            transform: translate(-50%, -50%) rotate(180deg) scaleX(-1);
+        }
+        .rotate-270.flipped {
+            transform: translate(-50%, -50%) rotate(270deg) scaleX(-1);
         }
         #player.rotate-90 {
             transform: rotate(90deg);
@@ -615,6 +627,7 @@
 
         let allVideoFiles = [];
         let allProjectFolders = [];
+        const skipDirs = new Set(['edit thumbnails', 'thumbnails', 'sc', '.git', 'node_modules', 'recovery', '$recycle.bin', 'system volume information']);
         let shortcutSelections = new Map(); // Key: projectPath + '|' + videoName, Value: { videoName, projectPath, subfolder, type, rotation }
         let initialShortcutSelections = new Map(); // Key: projectPath + '|' + videoName, Value: { type, rotation }
         let currentDirHandle;
@@ -1029,7 +1042,7 @@
             // Deprecated - row action bars handle their own active states
         }
 
-        function playVideo(file, rotation) {
+        function playVideo(file, rotation, flipped = false) {
             if (currentVideoUrl) {
                 URL.revokeObjectURL(currentVideoUrl);
             }
@@ -1042,16 +1055,18 @@
             player.style.maxWidth = '90vw';
             player.style.maxHeight = '90vh';
 
+            let transform = '';
             if (rotation !== "0") {
-                player.style.transform = `rotate(${rotation}deg)`;
+                transform += `rotate(${rotation}deg) `;
                 if (rotation === "90" || rotation === "270") {
-                    // When rotated 90/270, the width and height effectively swap.
-                    // We must ensure the rotated width (original height) fits in 90vw
-                    // and the rotated height (original width) fits in 90vh.
                     player.style.maxWidth = '90vh';
                     player.style.maxHeight = '90vw';
                 }
             }
+            if (flipped) {
+                transform += 'scaleX(-1) ';
+            }
+            player.style.transform = transform.trim();
             videoModal.style.display = 'flex';
             player.play();
         }
@@ -1099,15 +1114,19 @@
             const selection = shortcutSelections.get(key);
             const type = selection ? selection.type : '';
             const rotation = selection ? selection.rotation : "0";
+            const flipped = selection ? !!selection.flipped : false;
 
             rowDiv.querySelectorAll('.thumbnail').forEach(t => {
-                t.classList.remove('selected-root-sc', 'selected-subfolder-sc', 'selected-both-sc', 'selected-delete-sc', 'selected-playlist-sc', 'selected-shortcut');
+                t.classList.remove('selected-root-sc', 'selected-subfolder-sc', 'selected-both-sc', 'selected-delete-sc', 'selected-playlist-sc', 'selected-shortcut', 'flipped');
                 t.classList.remove('rotate-90', 'rotate-180', 'rotate-270');
                 if (type) {
                     t.classList.add('selected-' + type);
                 }
                 if (rotation !== "0") {
                     t.classList.add('rotate-' + rotation);
+                }
+                if (flipped) {
+                    t.classList.add('flipped');
                 }
             });
 
@@ -1128,7 +1147,7 @@
                 }
             });
 
-            layoutLandscapeThumbnails();
+            debouncedLayout();
         }
 
         function createRowActionBar(videoName, projectPath, subfolder, rowDiv) {
@@ -1198,6 +1217,50 @@
             leftGroup.appendChild(createBtn('Root', () => setType('root-sc'), 'root-sc', '--root-sc-color'));
             leftGroup.appendChild(createBtn('Rotate 180°', () => rotate(180)));
 
+            const toggleFlip = () => {
+                let selection = shortcutSelections.get(key);
+                if (!selection) {
+                    selection = { videoName, projectPath, subfolder, type: '', rotation: "0", flipped: false };
+                    shortcutSelections.set(key, selection);
+                }
+                selection.flipped = !selection.flipped;
+                updateRowUI(rowDiv, videoName, projectPath);
+            };
+            leftGroup.appendChild(createBtn('H Flip', toggleFlip));
+
+            const moveSelect = document.createElement('select');
+            moveSelect.className = 'move-to-selector';
+            moveSelect.style.marginLeft = '10px';
+            moveSelect.style.height = '28px';
+            moveSelect.style.fontSize = '12px';
+
+            const defaultOpt = document.createElement('option');
+            defaultOpt.value = '';
+            defaultOpt.textContent = 'Move to...';
+            moveSelect.appendChild(defaultOpt);
+
+            allProjectFolders.forEach(proj => {
+                if (proj.path !== projectPath) {
+                    const opt = document.createElement('option');
+                    opt.value = proj.path;
+                    opt.textContent = proj.name;
+                    moveSelect.appendChild(opt);
+                }
+            });
+
+            moveSelect.onclick = (e) => e.stopPropagation();
+            moveSelect.onchange = (e) => {
+                const targetPath = e.target.value;
+                let selection = shortcutSelections.get(key);
+                if (!selection) {
+                    selection = { videoName, projectPath, subfolder, type: '', rotation: "0" };
+                    shortcutSelections.set(key, selection);
+                }
+                selection.targetProject = targetPath;
+            };
+
+            leftGroup.appendChild(moveSelect);
+
             bar.appendChild(leftGroup);
             return bar;
         }
@@ -1227,10 +1290,14 @@
         }
 
         async function findDirectoryHandleByName(dirHandle, name) {
-            const lowerCaseName = name.toLowerCase();
-            for await (const entry of dirHandle.values()) {
-                if (entry.kind === 'directory' && entry.name.toLowerCase() === lowerCaseName) {
-                    return entry;
+            try {
+                return await dirHandle.getDirectoryHandle(name);
+            } catch (e) {
+                const lowerCaseName = name.toLowerCase();
+                for await (const entry of dirHandle.values()) {
+                    if (entry.kind === 'directory' && entry.name.toLowerCase() === lowerCaseName) {
+                        return entry;
+                    }
                 }
             }
             throw new Error(`Directory '${name}' not found.`);
@@ -1275,6 +1342,12 @@
                 if (bottom > maxBottom) maxBottom = bottom;
             });
             contentSpacer.style.height = (maxBottom + 20) + 'px';
+        }
+
+        let layoutTimeout;
+        function debouncedLayout() {
+            clearTimeout(layoutTimeout);
+            layoutTimeout = setTimeout(layoutLandscapeThumbnails, 100);
         }
 
         function layoutLandscapeThumbnails() {
@@ -1327,20 +1400,113 @@
                 } else if (s.rotation && s.rotation !== "0") {
                     selectedProjectPaths.add(s.projectPath || "");
                 }
+                if (s.targetProject) {
+                    selectedProjectPaths.add(s.targetProject);
+                    selectedProjectPaths.add(s.projectPath || "");
+                }
             });
             const dummyTimestampProjects = new Set([...displayedProjectPaths].filter(p => !selectedProjectPaths.has(p)));
 
             let scriptLines = [
                 '\$PSScriptRoot = Split-Path -Parent -Path \$MyInvocation.MyCommand.Definition',
                 '\$wshell = New-Object -ComObject WScript.Shell',
+                '',
+                'function Update-RotationData {',
+                '    param([string]\$filePath, [hashtable]\$toAdd, [string[]]\$toRemove)',
+                '    \$data = @{}',
+                '    if (Test-Path -LiteralPath \$filePath) {',
+                '        Get-Content -LiteralPath \$filePath | ForEach-Object {',
+                '            if (\$_ -match "^(.*?):(.*)$") {',
+                '                \$data[\$matches[1]] = \$matches[2]',
+                '            }',
+                '        }',
+                '    }',
+                '    foreach (\$key in \$toRemove) { \$data.Remove(\$key) }',
+                '    foreach (\$key in \$toAdd.Keys) { \$data[\$key] = \$toAdd[\$key] }',
+                '    if (\$data.Count -eq 0) {',
+                '        if (Test-Path -LiteralPath \$filePath) { Remove-Item -LiteralPath \$filePath }',
+                '    } else {',
+                '        \$content = @()',
+                '        foreach (\$key in \$data.Keys) { \$content += ("{0}:{1}" -f \$key, \$data[\$key]) }',
+                '        \$content | Out-File -FilePath \$filePath -Encoding utf8',
+                '    }',
+                '}',
                 ''
             ];
+
+            // --- Moving Videos and Thumbnails ---
+            const fileMoves = selectionsToProcess.filter(sel => sel.targetProject);
+            if (fileMoves.length > 0) {
+                scriptLines.push('# --- Moving Videos and Thumbnails ---');
+                fileMoves.forEach(sel => {
+                    const escapedVideoName = escapePSString(sel.videoName);
+                    const escapedSourceProjectPath = escapePSString(sel.projectPath);
+                    const escapedTargetProjectPath = escapePSString(sel.targetProject);
+                    const escapedSubfolder = escapePSString(sel.subfolder);
+
+                    let sourceVideoPathVar = '\$PSScriptRoot';
+                    if (escapedSourceProjectPath) sourceVideoPathVar = `(Join-Path -Path ${sourceVideoPathVar} -ChildPath '${escapedSourceProjectPath}')`;
+                    if (escapedSubfolder) sourceVideoPathVar = `(Join-Path -Path ${sourceVideoPathVar} -ChildPath '${escapedSubfolder}')`;
+                    scriptLines.push(`\$sourceVideoPath = Join-Path -Path ${sourceVideoPathVar} -ChildPath '${escapedVideoName}'`);
+
+                    let targetVideoPathVar = `(Join-Path -Path \$PSScriptRoot -ChildPath '${escapedTargetProjectPath}')`;
+                    scriptLines.push(`\$targetVideoPath = Join-Path -Path ${targetVideoPathVar} -ChildPath '${escapedVideoName}'`);
+
+                    scriptLines.push('if (Test-Path -LiteralPath \$sourceVideoPath) {');
+                    scriptLines.push('    Move-Item -LiteralPath \$sourceVideoPath -Destination \$targetVideoPath -Force');
+                    scriptLines.push(`    Write-Host "Moved video to: ${escapedTargetProjectPath}\\${escapedVideoName}"`);
+                    scriptLines.push('}');
+
+                    const thumbBase = sel.videoName.substring(0, sel.videoName.lastIndexOf('.'));
+                    const escapedThumbBase = escapePSString(thumbBase);
+
+                    scriptLines.push(`\$sourceProjectPath = ${escapedSourceProjectPath ? `Join-Path -Path \$PSScriptRoot -ChildPath '${escapedSourceProjectPath}'` : '\$PSScriptRoot'}`);
+                    scriptLines.push(`\$targetProjectPath = Join-Path -Path \$PSScriptRoot -ChildPath '${escapedTargetProjectPath}'`);
+                    scriptLines.push(`\$thumbDirs = @('Thumbnails', 'Edit Thumbnails')`);
+                    scriptLines.push(`foreach (\$dirName in \$thumbDirs) {`);
+                    scriptLines.push(`    \$srcDirPath = Join-Path -Path \$sourceProjectPath -ChildPath \$dirName`);
+                    scriptLines.push(`    \$tgtDirPath = Join-Path -Path \$targetProjectPath -ChildPath \$dirName`);
+                    scriptLines.push(`    if (-not (Test-Path -LiteralPath \$tgtDirPath)) { New-Item -ItemType Directory -Path \$tgtDirPath -Force | Out-Null }`);
+                    scriptLines.push(`    if (Test-Path -LiteralPath \$srcDirPath) {`);
+                    scriptLines.push(`        Get-ChildItem -Path \$srcDirPath -Filter '${escapedThumbBase}_*' | ForEach-Object { Move-Item -LiteralPath \$_.FullName -Destination \$tgtDirPath -Force }`);
+                    scriptLines.push(`        Write-Host "Moved thumbnails for ${escapedVideoName} to ${escapedTargetProjectPath}\\$dirName"`);
+                    scriptLines.push(`    }`);
+                    scriptLines.push(`}`);
+
+                    // Move subfolder shortcuts
+                    scriptLines.push(`\$srcScPath = Join-Path -Path \$sourceProjectPath -ChildPath 'sc'`);
+                    scriptLines.push(`\$tgtScPath = Join-Path -Path \$targetProjectPath -ChildPath 'sc'`);
+                    scriptLines.push(`\$scFileName = '${escapedVideoName}.lnk'`);
+                    scriptLines.push(`\$srcScFile = Join-Path -Path \$srcScPath -ChildPath \$scFileName`);
+                    scriptLines.push(`if (Test-Path -LiteralPath \$srcScFile) {`);
+                    scriptLines.push(`    if (-not (Test-Path -LiteralPath \$tgtScPath)) { New-Item -ItemType Directory -Path \$tgtScPath -Force | Out-Null }`);
+                    scriptLines.push(`    \$tgtScFile = Join-Path -Path \$tgtScPath -ChildPath \$scFileName`);
+                    scriptLines.push(`    Move-Item -LiteralPath \$srcScFile -Destination \$tgtScFile -Force`);
+                    scriptLines.push(`    \$shortcut = \$wshell.CreateShortcut(\$tgtScFile)`);
+                    scriptLines.push(`    \$shortcut.TargetPath = \$targetVideoPath`);
+                    scriptLines.push(`    \$shortcut.Save()`);
+                    scriptLines.push(`    Write-Host "Moved and updated subfolder shortcut for ${escapedVideoName}"`);
+                    scriptLines.push(`}`);
+
+                    // Update root shortcuts if they exist
+                    scriptLines.push(`\$rootScPath = Join-Path -Path \$PSScriptRoot -ChildPath 'sc'`);
+                    scriptLines.push(`\$rootScFile = Join-Path -Path \$rootScPath -ChildPath \$scFileName`);
+                    scriptLines.push(`if (Test-Path -LiteralPath \$rootScFile) {`);
+                    scriptLines.push(`    \$shortcut = \$wshell.CreateShortcut(\$rootScFile)`);
+                    scriptLines.push(`    \$shortcut.TargetPath = \$targetVideoPath`);
+                    scriptLines.push(`    \$shortcut.Save()`);
+                    scriptLines.push(`    Write-Host "Updated root shortcut target for ${escapedVideoName}"`);
+                    scriptLines.push(`}`);
+
+                    scriptLines.push('');
+                });
+            }
 
             const hasCreations = selectionsToProcess.some(sel => {
                 if (sel.type === 'delete-sc') return false;
                 const key = sel.projectPath + '|' + sel.videoName;
                 const initial = initialShortcutSelections.get(key);
-                return !initial || initial.type !== sel.type;
+                return !initial || initial.type !== sel.type || sel.targetProject;
             });
 
             if (hasCreations) {
@@ -1374,6 +1540,15 @@
                 }
                 scriptLines.push('if (-not (Test-Path -Path \$subfolderScPath)) { New-Item -ItemType Directory -Path \$subfolderScPath -Force | Out-Null }');
             });
+
+            const targetProjects = new Set(selectionsToProcess.filter(sel => sel.targetProject && (sel.type === 'subfolder-sc' || sel.type === 'both-sc')).map(sel => sel.targetProject));
+            targetProjects.forEach(projectPath => {
+                if (!subfolderProjects.has(projectPath)) {
+                    const escapedProjectPath = escapePSString(projectPath);
+                    scriptLines.push(`\$subfolderScPath = Join-Path -Path (Join-Path -Path \$PSScriptRoot -ChildPath '${escapedProjectPath}') -ChildPath 'sc'`);
+                    scriptLines.push('if (-not (Test-Path -Path \$subfolderScPath)) { New-Item -ItemType Directory -Path \$subfolderScPath -Force | Out-Null }');
+                }
+            });
             if (subfolderProjects.size > 0) {
                 scriptLines.push('');
             }
@@ -1381,8 +1556,8 @@
             selectionsToProcess.forEach(sel => {
                 const key = sel.projectPath + '|' + sel.videoName;
                 const initial = initialShortcutSelections.get(key);
-                if (initial && initial.type === sel.type) {
-                    return; // Skip if unchanged
+                if (initial && initial.type === sel.type && !sel.targetProject) {
+                    return; // Skip if unchanged and not moved
                 }
                 
                 const selectionType = sel.type;
@@ -1391,13 +1566,20 @@
                 const escapedVideoName = escapePSString(sel.videoName);
                 const escapedProjectPath = escapePSString(sel.projectPath);
                 const escapedSubfolder = escapePSString(sel.subfolder);
+                const escapedTargetProjectPath = sel.targetProject ? escapePSString(sel.targetProject) : null;
 
                 let targetPathConstruction = '\$PSScriptRoot';
-                if (escapedProjectPath) {
-                    targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedProjectPath}')`;
-                }
-                if (escapedSubfolder) {
-                    targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedSubfolder}')`;
+                if (escapedTargetProjectPath !== null) {
+                    if (escapedTargetProjectPath !== '') {
+                        targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedTargetProjectPath}')`;
+                    }
+                } else {
+                    if (escapedProjectPath) {
+                        targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedProjectPath}')`;
+                    }
+                    if (escapedSubfolder) {
+                        targetPathConstruction = `(Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedSubfolder}')`;
+                    }
                 }
                 targetPathConstruction = `Join-Path -Path ${targetPathConstruction} -ChildPath '${escapedVideoName}'`;
 
@@ -1426,10 +1608,11 @@
 
                 if (selectionType === 'subfolder-sc' || selectionType === 'both-sc') {
                     const initiallyInSubfolder = initial && (initial.type === 'subfolder-sc' || initial.type === 'both-sc');
-                    if (!initiallyInSubfolder) {
+                    if (!initiallyInSubfolder || sel.targetProject) {
                         let scDirPath;
-                        if (escapedProjectPath) {
-                            scDirPath = `Join-Path -Path (Join-Path -Path \$PSScriptRoot -ChildPath '${escapedProjectPath}') -ChildPath 'sc'`;
+                        const projectPathToUse = escapedTargetProjectPath || escapedProjectPath;
+                        if (projectPathToUse) {
+                            scDirPath = `Join-Path -Path (Join-Path -Path \$PSScriptRoot -ChildPath '${projectPathToUse}') -ChildPath 'sc'`;
                         } else {
                             scDirPath = 'Join-Path -Path \$PSScriptRoot -ChildPath \'sc\'';
                         }
@@ -1519,48 +1702,66 @@
             }
 
             // --- Rotation Data ---
-            const rotationByProject = new Map();
+            const rotationUpdates = new Map(); // projectPath -> { toAdd: {}, toRemove: [] }
+
+            const getUpdate = (proj) => {
+                if (!rotationUpdates.has(proj)) {
+                    rotationUpdates.set(proj, { toAdd: {}, toRemove: [] });
+                }
+                return rotationUpdates.get(proj);
+            };
+
             shortcutSelections.forEach((sel, key) => {
-                if (sel.rotation && sel.rotation !== "0") {
-                    if (!rotationByProject.has(sel.projectPath)) {
-                        rotationByProject.set(sel.projectPath, []);
+                const initial = initialShortcutSelections.get(key);
+                const isMoved = sel.targetProject && sel.targetProject !== sel.projectPath;
+
+                const currentRot = sel.rotation || "0";
+                const initialRot = (initial && initial.rotation) || "0";
+                const currentFlipped = !!sel.flipped;
+                const initialFlipped = initial ? !!initial.flipped : false;
+
+                const getVal = (r, f) => (f ? `${r}:flip` : r);
+
+                if (isMoved) {
+                    // Remove from source
+                    getUpdate(sel.projectPath).toRemove.push(sel.videoName);
+                    // Add/Update in destination
+                    const rotationVal = getVal(currentRot, currentFlipped);
+                    if (rotationVal !== "0") {
+                        getUpdate(sel.targetProject).toAdd[sel.videoName] = rotationVal;
                     }
-                    rotationByProject.get(sel.projectPath).push(`${sel.videoName}:${sel.rotation}`);
+                } else {
+                    // Not moved, check if rotation or flip changed
+                    if (currentRot !== initialRot || currentFlipped !== initialFlipped) {
+                        const rotationVal = getVal(currentRot, currentFlipped);
+                        if (rotationVal === "0") {
+                            getUpdate(sel.projectPath).toRemove.push(sel.videoName);
+                        } else {
+                            getUpdate(sel.projectPath).toAdd[sel.videoName] = rotationVal;
+                        }
+                    }
                 }
             });
 
-            // Also check initial selections that might have been cleared
-            initialShortcutSelections.forEach((initial, key) => {
-                const parts = key.split('|');
-                const projectPath = parts[0];
-                const videoName = parts[1];
-                const current = shortcutSelections.get(key);
-                if (initial.rotation && initial.rotation !== "0" && (!current || current.rotation === "0")) {
-                     // This rotation was cleared. We need to make sure the project is processed to update rotation_data.txt
-                     if (!rotationByProject.has(projectPath)) {
-                        rotationByProject.set(projectPath, []);
-                     }
-                }
-            });
-
-            if (rotationByProject.size > 0) {
+            if (rotationUpdates.size > 0) {
                 scriptLines.push('# --- Updating Rotation Data ---');
-                rotationByProject.forEach((rotations, projectPath) => {
+                rotationUpdates.forEach((update, projectPath) => {
                     const escapedProjectPath = escapePSString(projectPath);
                     const projectPathVar = escapedProjectPath ? `(Join-Path -Path \$PSScriptRoot -ChildPath '${escapedProjectPath}')` : '\$PSScriptRoot';
                     const rotationFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'rotation_data.txt')`;
                     
-                    if (rotations.length === 0) {
-                        scriptLines.push(`if (Test-Path -LiteralPath ${rotationFileVar}) { Remove-Item -LiteralPath ${rotationFileVar}; Write-Host "Removed rotation_data.txt for ${escapedProjectPath}" }`);
-                    } else {
-                        scriptLines.push('\$rotContent = @(');
-                        rotations.forEach(rot => {
-                            scriptLines.push(`    '${escapePSString(rot)}'`);
-                        });
-                        scriptLines.push(')');
-                        scriptLines.push(`\$rotContent | Out-File -FilePath ${rotationFileVar} -Encoding utf8`);
-                        scriptLines.push(`Write-Host "Updated rotation_data.txt for ${escapedProjectPath}"`);
+                    scriptLines.push(`\$toAdd = @{`);
+                    for (const [vName, rot] of Object.entries(update.toAdd)) {
+                        scriptLines.push(`    '${escapePSString(vName)}' = '${rot}'`);
                     }
+                    scriptLines.push(`}`);
+                    scriptLines.push(`\$toRemove = @(`);
+                    update.toRemove.forEach(vName => {
+                        scriptLines.push(`    '${escapePSString(vName)}'`);
+                    });
+                    scriptLines.push(`)`);
+                    scriptLines.push(`Update-RotationData -filePath ${rotationFileVar} -toAdd \$toAdd -toRemove \$toRemove`);
+                    scriptLines.push(`Write-Host "Surgically updated rotation_data.txt for ${escapedProjectPath || '(Root)'}"`);
                 });
                 scriptLines.push('');
 
@@ -1617,6 +1818,59 @@
                 scriptLines.push('');
             }
 
+            // --- Update Central LUA Flip File ---
+            const flippedFiles = Array.from(shortcutSelections.values()).filter(sel => sel.flipped);
+            if (flippedFiles.length > 0) {
+                scriptLines.push('# --- Update Central LUA Flip File ---');
+                scriptLines.push("\$flipLuaPath = 'C:\\Bridge\\misc\\tools\\mpv-x86_64-v3-20260418-git-4377cce\\portable_config\\scripts\\flip.lua'");
+                scriptLines.push('\$script:flippedFiles = @{}');
+                flippedFiles.forEach(sel => {
+                    scriptLines.push(`\$script:flippedFiles['${escapePSString(sel.videoName)}'] = 'hflip'`);
+                });
+
+                scriptLines.push('\$allFlips = @{}');
+                scriptLines.push('if (Test-Path -LiteralPath \$flipLuaPath) {');
+                scriptLines.push('    \$existingFlipContent = Get-Content -LiteralPath \$flipLuaPath -Raw');
+                scriptLines.push('    if (\$existingFlipContent -match \'(?s)local flips = \\{(.*?)\\}\') {');
+                scriptLines.push('        \$innerFlip = \$matches[1]');
+                scriptLines.push('        \$flipEntries = \$innerFlip -split \',\'');
+                scriptLines.push('        foreach (\$fEntry in \$flipEntries) {');
+                scriptLines.push('            if (\$fEntry -match "\\[[\'\\"\" ]*(.*?)[\'\\"\" ]*\\]\\s*=\\s*[\'\\"\" ]*(.*?)[\'\\"\" ]*") {');
+                scriptLines.push('                \$allFlips[\$matches[1]] = \$matches[2]');
+                scriptLines.push('            }');
+                scriptLines.push('        }');
+                scriptLines.push('    }');
+                scriptLines.push('}');
+                scriptLines.push('foreach (\$fFile in \$script:flippedFiles.Keys) { \$allFlips[\$fFile] = \$script:flippedFiles[\$fFile] }');
+                scriptLines.push('if (\$allFlips.Count -gt 0) {');
+                scriptLines.push('    \$flipLuaDir = Split-Path -Parent \$flipLuaPath');
+                scriptLines.push('    if (-not (Test-Path -Path \$flipLuaDir)) { New-Item -ItemType Directory -Path \$flipLuaDir -Force | Out-Null }');
+                scriptLines.push('    \$flipLuaContent = @()');
+                scriptLines.push("    \$flipLuaContent += 'local flips = {'");
+                scriptLines.push('    foreach (\$fFile in \$allFlips.Keys) {');
+                scriptLines.push('        \$filter = \$allFlips[\$fFile]');
+                scriptLines.push("        \$escapedFFile = \$fFile.Replace(\"'\", \"\\\\'\")");
+                scriptLines.push("        \$flipLuaContent += \"    ['\$escapedFFile'] = '\$filter',\"");
+                scriptLines.push("    }");
+                scriptLines.push("    \$flipLuaContent += '}'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += 'mp.register_event(\"file-loaded\", function()'");
+                scriptLines.push("    \$flipLuaContent += '    local path = mp.get_property(\"path\")'");
+                scriptLines.push("    \$flipLuaContent += '    local filename = path:match(\"^.+[\\\\\\\\/](.+)\$\") or path'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += '    mp.command(\"vf remove @flip\")'");
+                scriptLines.push("    \$flipLuaContent += ''");
+                scriptLines.push("    \$flipLuaContent += '    if flips[filename] then'");
+                scriptLines.push("    \$flipLuaContent += '        local filter = flips[filename]'");
+                scriptLines.push("    \$flipLuaContent += '        mp.commandv(\"vf\", \"add\", \"@flip:\" .. filter)'");
+                scriptLines.push("    \$flipLuaContent += '    end'");
+                scriptLines.push("    \$flipLuaContent += 'end)'");
+                scriptLines.push('    \$flipLuaContent | Out-File -FilePath \$flipLuaPath -Encoding utf8');
+                scriptLines.push('    Write-Host "Updated MPV flip script at: \$flipLuaPath"');
+                scriptLines.push('}');
+                scriptLines.push('');
+            }
+
             const timestamp = new Date().toISOString();
 
             if (selectedProjectPaths.size > 0) {
@@ -1652,11 +1906,11 @@
             scriptLines.push('Write-Host "Script execution complete."');
             scriptLines.push('Read-Host -Prompt "Press Enter to exit"');
 
-            const script = scriptLines.join('\r\n');
-            batchScriptTextArea.value = script;
-            const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
+            const scriptStr = scriptLines.join('\r\n');
+            batchScriptTextArea.value = scriptStr;
+            const blob = new Blob(['\ufeff', scriptStr], { type: 'application/octet-stream' });
             downloadScriptLink.href = URL.createObjectURL(blob);
-            downloadScriptLink.download = 'update_shortcuts.ps1';
+            downloadScriptLink.download = 'create_shortcuts.ps1';
         }
 
 
@@ -1684,8 +1938,11 @@
                 const text = await file.text();
                 text.split('\n').forEach(line => {
                     const parts = line.trim().split(':');
-                    if (parts.length === 2) {
-                        rotationMap.set(parts[0].trim().toLowerCase(), parts[1].trim());
+                    if (parts.length >= 2) {
+                        const videoName = parts[0].trim().toLowerCase();
+                        const rotationValue = parts[1].trim();
+                        const isFlipped = parts.length > 2 && parts[2].trim().toLowerCase() === 'flip';
+                        rotationMap.set(videoName, { rotation: rotationValue, flipped: isFlipped });
                     }
                 });
             } catch (e) {}
@@ -1704,7 +1961,7 @@
                 } catch (e) {}
 
                 for await (const entry of dirHandle.values()) {
-                    if (entry.kind === 'directory' && entry.name.toLowerCase() !== 'sc' && entry.name.toLowerCase() !== 'edit thumbnails' && entry.name.toLowerCase() !== 'thumbnails') {
+                    if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                         await scanDir(entry);
                     }
                 }
@@ -1824,7 +2081,7 @@
 
             async function findProjectFolders(dirHandle, currentPath = '') {
                  for await (const entry of dirHandle.values()) {
-                    if (entry.kind === 'directory') {
+                    if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
                         const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
                         try {
                             await findDirectoryHandleByName(entry, 'Edit Thumbnails');
@@ -1955,329 +2212,344 @@
                 }
             }
 
-            const allImageLoadPromises = [];
-            for (const project of projectFolders) {
-                console.log(`Processing project: ${project.name} (Path: ${project.path})`);
-                const projectScData = await getScDataForProject(project.handle);
-                const projectRotationData = await getRotationData(project.handle);
-                
-                const normalizedProjectName = normalizeProjectKey(project.name);
-                const normalizedProjectPath = normalizeProjectKey(project.path);
-                console.log(`Matching project: Name="${normalizedProjectName}", Path="${normalizedProjectPath}"`);
-                
-                let rootProjectShortcutsSet = rootScDataSets.get(normalizedProjectName) || new Set();
-                if (rootProjectShortcutsSet.size === 0 && normalizedProjectPath && normalizedProjectPath !== normalizedProjectName) {
-                    rootProjectShortcutsSet = rootScDataSets.get(normalizedProjectPath) || new Set();
-                }
-                console.log(`Project: ${project.name}, rootProjectShortcutsSet size: ${rootProjectShortcutsSet.size}`);
-
-                const canvasId = getNextCanvasId();
-                const canvasElements = [];
-                let mostRecentShortcutTime = project.timestamp || 0;
-
-                const projectVideoFiles = [];
-                // Recursively find videos in subfolders
-                async function findVideos(dirHandle, subfolder = '') {
+            allProjectFolders = [...projectFolders];
+            console.log(`Initial projectFolders count: ${projectFolders.length}`);
+            if (g_rootHandle && g_rootHandle !== currentDirHandle) {
+                console.log(`Scanning root handle ${g_rootHandle.name} for additional project folders...`);
+                // If we have a root handle that is different from currentDirHandle,
+                // we should also scan it for other project folders to populate the move-to dropdown.
+                const rootProjectFolders = [];
+                async function findRootProjectFolders(dirHandle, currentPath = '') {
                     for await (const entry of dirHandle.values()) {
-                        if (entry.kind === 'file' && entry.name.match(/\.(mp4|avi|mov|mkv)$/i)) {
-                            const file = await entry.getFile();
-                            if (!isNewOnly || file.lastModified > mostRecentShortcutTime) {
-                                // Store additional path info on the file object
-                                file.subfolder = subfolder;
-                                file.projectPath = project.path;
-                                projectVideoFiles.push(file);
-                            } else if (isNewOnly) {
-                                console.log(`Filtering out old video: ${entry.name} (Modified: ${new Date(file.lastModified).toLocaleString()}, Cutoff: ${new Date(mostRecentShortcutTime).toLocaleString()})`);
+                        if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
+                            const newPath = currentPath ? `${currentPath}\\${entry.name}` : entry.name;
+                            try {
+                                await findDirectoryHandleByName(entry, 'Edit Thumbnails');
+                                rootProjectFolders.push({
+                                    handle: entry,
+                                    path: newPath,
+                                    name: entry.name
+                                });
+                            } catch (e) {
+                                await findRootProjectFolders(entry, newPath);
                             }
-                        } else if (entry.kind === 'directory' && entry.name.toLowerCase() !== 'edit thumbnails' && entry.name.toLowerCase() !== 'thumbnails' && entry.name.toLowerCase() !== 'sc') {
-                            await findVideos(entry, subfolder ? `${subfolder}\\${entry.name}` : entry.name);
                         }
                     }
                 }
-                await findVideos(project.handle);
-                allVideoFiles.push(...projectVideoFiles);
+                await findRootProjectFolders(g_rootHandle, '');
 
-                const editDirHandle = await findDirectoryHandleByName(project.handle, 'Edit Thumbnails');
-                const landscapeFiles = [];
-                 for await (const entry of editDirHandle.values()) {
-                    if (entry.kind === 'file' && entry.name.match(/\.(jpe?g|png|gif|webp)$/i)) {
-                        landscapeFiles.push(await entry.getFile());
+                // Merge unique projects based on path
+                const existingPaths = new Set(allProjectFolders.map(p => p.path));
+                rootProjectFolders.forEach(p => {
+                    if (!existingPaths.has(p.path)) {
+                        allProjectFolders.push(p);
                     }
-                }
-
-                const groupedFiles = landscapeFiles.reduce((acc, file) => {
-                    const match = file.name.match(/^(.*?)_(\d+)\.[^.]+$/);
-                    if (match) {
-                        const videoName = match[1];
-                        if (!acc[videoName]) acc[videoName] = [];
-                        acc[videoName].push(file);
-                    }
-                    return acc;
-                }, {});
-
-                const videoFileMap = new Map(projectVideoFiles.map(f => [f.name.substring(0, f.name.lastIndexOf('.')), f]));
-                
-                let videoNames = Object.keys(groupedFiles);
-                videoNames.sort((a, b) => {
-                    if (sortBy === 'name-asc') return a.localeCompare(b);
-                    if (sortBy === 'name-desc') return b.localeCompare(a);
-                    const fileA = videoFileMap.get(a);
-                    const fileB = videoFileMap.get(b);
-                    const dateA = fileA ? fileA.lastModified : 0;
-                    const dateB = fileB ? fileB.lastModified : 0;
-                    if (sortBy === 'date-new') return dateB - dateA;
-                    if (sortBy === 'date-old') return dateA - dateB;
-                    return 0;
                 });
+                allProjectFolders.sort((a, b) => a.name.localeCompare(b.name));
+            }
 
-                const projectRows = [];
-                const hasAnyShortcuts = projectScData.size > 0 || rootProjectShortcutsSet.size > 0;
+            console.log(`Starting to process ${projectFolders.length} project folders...`);
+            const allImageLoadPromises = [];
+            let processedProjects = 0;
+            let firstCanvasRendered = false;
+            for (const project of projectFolders) {
+                try {
+                    console.log(`Processing project: ${project.name} (Path: ${project.path})`);
+                    const projectScData = await getScDataForProject(project.handle);
+                    const projectRotationData = await getRotationData(project.handle);
 
-                for (const videoName of videoNames) {
-                    const videoFile = videoFileMap.get(videoName);
-                    if (!videoFile) continue;
+                    const normalizedProjectName = normalizeProjectKey(project.name);
+                    const normalizedProjectPath = normalizeProjectKey(project.path);
 
-                    const hasProjectSc = checkShortcut(videoFile.name, projectScData);
-                    let rootScEntry = checkShortcut(videoFile.name, rootProjectShortcutsSet);
+                    let rootProjectShortcutsSet = rootScDataSets.get(normalizedProjectName) || new Set();
+                    if (rootProjectShortcutsSet.size === 0 && normalizedProjectPath && normalizedProjectPath !== normalizedProjectName) {
+                        rootProjectShortcutsSet = rootScDataSets.get(normalizedProjectPath) || new Set();
+                    }
 
-                    // If not found in project-specific group, check if it's in a group named after the subfolder (for nested videos)
-                    if (!rootScEntry && videoFile.subfolder) {
-                        const subfolderLeaf = videoFile.subfolder.split(/[\\/]/).pop();
-                        if (subfolderLeaf) {
-                            const normalizedSubfolderLeaf = normalizeProjectKey(subfolderLeaf);
-                            const subfolderRootScSet = rootScDataSets.get(normalizedSubfolderLeaf);
-                            if (subfolderRootScSet) {
-                                rootScEntry = checkShortcut(videoFile.name, subfolderRootScSet);
+                    const canvasId = getNextCanvasId();
+                    const canvasElements = [];
+                    let mostRecentShortcutTime = project.timestamp || 0;
+
+                    const projectVideoFiles = [];
+                    // Recursively find videos in subfolders
+                    async function findVideos(dirHandle, subfolder = '') {
+                        for await (const entry of dirHandle.values()) {
+                            if (entry.kind === 'file' && entry.name.match(/\.(mp4|avi|mov|mkv)$/i)) {
+                                try {
+                                    const file = await entry.getFile();
+                                    if (!isNewOnly || file.lastModified > mostRecentShortcutTime) {
+                                        // Store additional path info on the file object
+                                        file.subfolder = subfolder;
+                                        file.projectPath = project.path;
+                                        projectVideoFiles.push(file);
+                                    }
+                                } catch (fileErr) {
+                                    console.warn(`Could not get file for ${entry.name}:`, fileErr);
+                                }
+                            } else if (entry.kind === 'directory' && !skipDirs.has(entry.name.toLowerCase())) {
+                                await findVideos(entry, subfolder ? `${subfolder}\\${entry.name}` : entry.name);
                             }
                         }
                     }
-                    
-                    // Also check the global/ungrouped shortcuts if still not found
-                    if (!rootScEntry) {
-                        const globalRootScSet = rootScDataSets.get("");
-                        if (globalRootScSet) {
-                            rootScEntry = checkShortcut(videoFile.name, globalRootScSet);
-                        }
-                    }
-                    
-                    let hasRootSc = rootScEntry !== false;
+                    await findVideos(project.handle);
+                    allVideoFiles.push(...projectVideoFiles);
 
-                    // In update-playlist-root mode, we ALSO check if the shortcut file exists directly in sc/
-                    let scDate = null;
-                    if (currentMode === 'update-playlist-root') {
-                        scDate = getShortcutDate(videoFile.name, rootShortcutDates);
-                        if (scDate !== null) {
-                            hasRootSc = true;
+                    const editDirHandle = await findDirectoryHandleByName(project.handle, 'Edit Thumbnails');
+                    const landscapeFiles = [];
+                     for await (const entry of editDirHandle.values()) {
+                        if (entry.kind === 'file' && entry.name.match(/\.(jpe?g|png|gif|webp)$/i)) {
+                            landscapeFiles.push(await entry.getFile());
                         }
                     }
 
-                    if (isShortcutsOnly) {
-                        if (currentMode === 'root-sc' || currentMode === 'playlist-root') {
-                            if (!hasRootSc) continue;
-                        } else if (currentMode === 'update-playlist-root') {
-                            if (!hasRootSc) {
-                                console.log(`Filtering out ${videoFile.name} because hasRootSc is false`);
-                                continue;
-                            }
-                            
-                            // If we don't have a shortcut date, fall back to the video file's date
-                            const effectiveDate = scDate || videoFile.lastModified;
-
-                            if (playlistCreationTime && effectiveDate <= (playlistCreationTime + 1000)) { // Add 1s tolerance
-                                console.log(`Filtering out ${videoFile.name} because effectiveDate (${effectiveDate}) <= playlistCreationTime + 1s (${playlistCreationTime + 1000}). (scDate was ${scDate}, videoDate was ${videoFile.lastModified})`);
-                                continue;
-                            } else if (playlistCreationTime) {
-                                console.log(`KEEPING ${videoFile.name}: effectiveDate (${effectiveDate}) > playlistCreationTime (${playlistCreationTime})`);
-                            }
-                        } else if (hasAnyShortcuts) {
-                            if (!hasProjectSc && !hasRootSc) continue;
+                    const groupedFiles = landscapeFiles.reduce((acc, file) => {
+                        const match = file.name.match(/^(.*?)_(\d+)\.[^.]+$/);
+                        if (match) {
+                            const videoName = match[1];
+                            if (!acc[videoName]) acc[videoName] = [];
+                            acc[videoName].push(file);
                         }
-                    }
+                        return acc;
+                    }, {});
 
-                    if (isNewOnly && mostRecentShortcutTime && videoFile.lastModified <= mostRecentShortcutTime) {
-                        continue;
-                    }
+                    const videoFileMap = new Map(projectVideoFiles.map(f => [f.name.substring(0, f.name.lastIndexOf('.')), f]));
 
-                    const files = groupedFiles[videoName].sort((a, b) => {
-                        const aNum = parseInt(a.name.substring(a.name.lastIndexOf('_') + 1));
-                        const bNum = parseInt(b.name.substring(b.name.lastIndexOf('_') + 1));
-                        return aNum - bNum;
+                    let videoNames = Object.keys(groupedFiles);
+                    videoNames.sort((a, b) => {
+                        if (sortBy === 'name-asc') return a.localeCompare(b);
+                        if (sortBy === 'name-desc') return b.localeCompare(a);
+                        const fileA = videoFileMap.get(a);
+                        const fileB = videoFileMap.get(b);
+                        const dateA = fileA ? fileA.lastModified : 0;
+                        const dateB = fileB ? fileB.lastModified : 0;
+                        if (sortBy === 'date-new') return dateB - dateA;
+                        if (sortBy === 'date-old') return dateA - dateB;
+                        return 0;
                     });
 
-                    const rowDiv = document.createElement('div');
-                    rowDiv.className = 'landscape-row';
-                    rowDiv.dataset.videoName = videoName;
-                    rowDiv.dataset.projectPath = project.path;
+                    const projectRows = [];
+                    const hasAnyShortcuts = projectScData.size > 0 || rootProjectShortcutsSet.size > 0;
 
-                    // Debug log for both-sc detection
-                    if (hasProjectSc || hasRootSc) {
-                        console.log(`[SC Match] Video: ${videoFile.name}, Subfolder: ${hasProjectSc}, Root: ${hasRootSc}`);
+                    for (const videoName of videoNames) {
+                        const videoFile = videoFileMap.get(videoName);
+                        if (!videoFile) continue;
+
+                        const hasProjectSc = checkShortcut(videoFile.name, projectScData);
+                        let rootScEntry = checkShortcut(videoFile.name, rootProjectShortcutsSet);
+
+                        // If not found in project-specific group, check if it's in a group named after the subfolder (for nested videos)
+                        if (!rootScEntry && videoFile.subfolder) {
+                            const subfolderLeaf = videoFile.subfolder.split(/[\\/]/).pop();
+                            if (subfolderLeaf) {
+                                const normalizedSubfolderLeaf = normalizeProjectKey(subfolderLeaf);
+                                const subfolderRootScSet = rootScDataSets.get(normalizedSubfolderLeaf);
+                                if (subfolderRootScSet) {
+                                    rootScEntry = checkShortcut(videoFile.name, subfolderRootScSet);
+                                }
+                            }
+                        }
+
+                        // Also check the global/ungrouped shortcuts if still not found
+                        if (!rootScEntry) {
+                            const globalRootScSet = rootScDataSets.get("");
+                            if (globalRootScSet) {
+                                rootScEntry = checkShortcut(videoFile.name, globalRootScSet);
+                            }
+                        }
+
+                        let hasRootSc = rootScEntry !== false;
+
+                        // In update-playlist-root mode, we ALSO check if the shortcut file exists directly in sc/
+                        let scDate = null;
+                        if (currentMode === 'update-playlist-root') {
+                            scDate = getShortcutDate(videoFile.name, rootShortcutDates);
+                            if (scDate !== null) {
+                                hasRootSc = true;
+                            }
+                        }
+
+                        if (isShortcutsOnly) {
+                            if (currentMode === 'root-sc' || currentMode === 'playlist-root') {
+                                if (!hasRootSc) continue;
+                            } else if (currentMode === 'update-playlist-root') {
+                                if (!hasRootSc) continue;
+                                const effectiveDate = scDate || videoFile.lastModified;
+                                if (playlistCreationTime && effectiveDate <= (playlistCreationTime + 1000)) continue;
+                            } else if (hasAnyShortcuts) {
+                                if (!hasProjectSc && !hasRootSc) continue;
+                            }
+                        }
+
+                        if (isNewOnly && mostRecentShortcutTime && videoFile.lastModified <= mostRecentShortcutTime) {
+                            continue;
+                        }
+
+                        const files = groupedFiles[videoName].sort((a, b) => {
+                            const aNum = parseInt(a.name.substring(a.name.lastIndexOf('_') + 1));
+                            const bNum = parseInt(b.name.substring(b.name.lastIndexOf('_') + 1));
+                            return aNum - bNum;
+                        });
+
+                        const rowDiv = document.createElement('div');
+                        rowDiv.className = 'landscape-row';
+                        rowDiv.dataset.videoName = videoName;
+                        rowDiv.dataset.projectPath = project.path;
+
+                        projectRows.push({ rowDiv, videoFile, files, initialShortcutType: '', hasProjectSc, hasRootSc, rootScEntry });
                     }
 
-                    projectRows.push({ rowDiv, videoFile, files, initialShortcutType: '', hasProjectSc, hasRootSc, rootScEntry });
-                }
+                    if (projectRows.length === 0) continue;
 
-                if (projectRows.length === 0) {
-                    continue;
-                }
+                    const groupHeader = document.createElement('h2');
+                    groupHeader.className = 'project-header';
+                    const groupHeaderText = document.createElement('span');
+                    const projectPrefix = (currentMode === 'root-sc' || currentMode === 'sc') ? 'Root Shortcuts: ' : '';
+                    groupHeaderText.textContent = `${projectPrefix}${project.name} (${projectRows.length} ${projectRows.length === 1 ? 'video' : 'videos'})`;
+                    groupHeader.appendChild(groupHeaderText);
 
-                const groupHeader = document.createElement('h2');
-                groupHeader.className = 'project-header';
-                const groupHeaderText = document.createElement('span');
-                const projectPrefix = (currentMode === 'root-sc' || currentMode === 'sc') ? 'Root Shortcuts: ' : '';
-                groupHeaderText.textContent = `${projectPrefix}${project.name} (${projectRows.length} ${projectRows.length === 1 ? 'video' : 'videos'})`;
-                groupHeader.appendChild(groupHeaderText);
+                    if (isNewOnly) {
+                        const headerDateInfo = document.createElement('span');
+                        headerDateInfo.className = 'date-info';
+                        headerDateInfo.textContent = `Last Shortcut: ${new Date(mostRecentShortcutTime).toLocaleString()}`;
+                        groupHeader.appendChild(headerDateInfo);
+                    } else if (currentMode === 'update-playlist-root' && playlistCreationTime) {
+                        const headerDateInfo = document.createElement('span');
+                        headerDateInfo.className = 'date-info';
+                        headerDateInfo.textContent = `Playlist Cutoff: ${new Date(playlistCreationTime).toLocaleString()}`;
+                        groupHeader.appendChild(headerDateInfo);
+                    }
+                    canvasElements.push(groupHeader);
 
-                if (isNewOnly) {
-                    const headerDateInfo = document.createElement('span');
-                    headerDateInfo.className = 'date-info';
-                    headerDateInfo.textContent = `Last Shortcut: ${new Date(mostRecentShortcutTime).toLocaleString()}`;
-                    groupHeader.appendChild(headerDateInfo);
-                } else if (currentMode === 'update-playlist-root' && playlistCreationTime) {
-                    const headerDateInfo = document.createElement('span');
-                    headerDateInfo.className = 'date-info';
-                    headerDateInfo.textContent = `Playlist Cutoff: ${new Date(playlistCreationTime).toLocaleString()}`;
-                    groupHeader.appendChild(headerDateInfo);
-                }
-                canvasElements.push(groupHeader);
+                    for (const rowData of projectRows) {
+                        const { rowDiv, videoFile, files, hasProjectSc, hasRootSc, rootScEntry } = rowData;
 
-                for (const rowData of projectRows) {
-                    const { rowDiv, videoFile, files, hasProjectSc, hasRootSc, rootScEntry } = rowData;
+                        const rowHeader = document.createElement('h3');
+                        rowHeader.className = 'project-header';
+                        rowHeader.style.fontSize = '1em';
+                        rowHeader.style.marginTop = '10px';
+                        rowHeader.style.borderBottom = 'none';
+                        rowHeader.appendChild(createDeleteCross(videoFile.name, project.path, videoFile.subfolder, rowDiv));
+                        const rowHeaderText = document.createElement('span');
+                        rowHeaderText.textContent = videoFile.name;
+                        rowHeader.appendChild(rowHeaderText);
 
-                    const rowHeader = document.createElement('h3');
-                    rowHeader.className = 'project-header';
-                    rowHeader.style.fontSize = '1em';
-                    rowHeader.style.marginTop = '10px';
-                    rowHeader.style.borderBottom = 'none';
-                    
-                    rowHeader.appendChild(createDeleteCross(videoFile.name, project.path, videoFile.subfolder, rowDiv));
-                    
-                    const rowHeaderText = document.createElement('span');
-                    rowHeaderText.textContent = videoFile.name;
-                    rowHeader.appendChild(rowHeaderText);
+                        rowDiv.prepend(rowHeader);
+                        rowDiv.appendChild(createRowActionBar(videoFile.name, project.path, videoFile.subfolder, rowDiv));
+                        const dateInfo = document.createElement('div');
+                        dateInfo.className = 'date-info';
+                        dateInfo.textContent = `Created: ${new Date(videoFile.lastModified).toLocaleString()}`;
+                        rowDiv.appendChild(dateInfo);
 
-                    rowDiv.prepend(rowHeader);
-                    rowDiv.appendChild(createRowActionBar(videoFile.name, project.path, videoFile.subfolder, rowDiv));
-                    const dateInfo = document.createElement('div');
-                    dateInfo.className = 'date-info';
-                    dateInfo.textContent = `Created: ${new Date(videoFile.lastModified).toLocaleString()}`;
-                    rowDiv.appendChild(dateInfo);
+                        let multiplierInput;
+                        if (currentMode === 'playlist-root') {
+                            const navContainer = document.createElement('div');
+                            navContainer.className = 'playlist-nav-container';
+                            rowDiv.appendChild(navContainer);
+                            multiplierInput = document.createElement('input');
+                            multiplierInput.type = 'number';
+                            multiplierInput.className = 'multiplier-input';
+                            multiplierInput.value = 1;
+                            multiplierInput.min = 1;
+                            multiplierInput.title = 'Add to playlist multiple times';
+                            navContainer.appendChild(multiplierInput);
+                            multiplierInput.addEventListener('change', () => {
+                                const key = project.path + '|' + videoFile.name;
+                                const existingSelection = shortcutSelections.get(key);
+                                if (existingSelection) existingSelection.multiplier = parseInt(multiplierInput.value) || 1;
+                            });
+                            multiplierInput.addEventListener('click', (e) => e.stopPropagation());
+                        }
 
-                    let multiplierInput;
-                    if (currentMode === 'playlist-root') {
-                        const navContainer = document.createElement('div');
-                        navContainer.className = 'playlist-nav-container';
-                        rowDiv.appendChild(navContainer);
+                        const thumbnailsContainer = document.createElement('div');
+                        thumbnailsContainer.className = 'thumbnails-container';
+                        rowDiv.appendChild(thumbnailsContainer);
 
-                        multiplierInput = document.createElement('input');
-                        multiplierInput.type = 'number';
-                        multiplierInput.className = 'multiplier-input';
-                        multiplierInput.value = 1;
-                        multiplierInput.min = 1;
-                        multiplierInput.title = 'Add to playlist multiple times';
-                        navContainer.appendChild(multiplierInput);
+                        let initialShortcutType = '';
+                        if (rootScEntry && typeof rootScEntry === 'string') {
+                            if (rootScEntry === 'BOTH') initialShortcutType = 'both-sc';
+                            else if (rootScEntry === 'ROOT') initialShortcutType = 'root-sc';
+                        }
+                        if (!initialShortcutType) {
+                            if (hasProjectSc && hasRootSc) initialShortcutType = 'both-sc';
+                            else if (hasProjectSc) initialShortcutType = 'subfolder-sc';
+                            else if (hasRootSc) initialShortcutType = 'root-sc';
+                        }
 
-                        multiplierInput.addEventListener('change', () => {
+                        const rotData = projectRotationData.get(videoFile.name.toLowerCase()) || { rotation: "0", flipped: false };
+                        const rotation = rotData.rotation;
+                        const flipped = rotData.flipped;
+
+                        if ((initialShortcutType || rotation !== "0" || flipped) && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') {
                             const key = project.path + '|' + videoFile.name;
-                            const existingSelection = shortcutSelections.get(key);
-                            if (existingSelection) {
-                                existingSelection.multiplier = parseInt(multiplierInput.value) || 1;
-                            }
-                        });
-
-                        multiplierInput.addEventListener('click', (e) => {
-                            e.stopPropagation();
-                        });
-                    }
-
-                    const thumbnailsContainer = document.createElement('div');
-                    thumbnailsContainer.className = 'thumbnails-container';
-                    rowDiv.appendChild(thumbnailsContainer);
-
-                    if (hasProjectSc) console.log(`Match found in project scdata for: ${videoFile.name}`);
-                    if (hasRootSc) console.log(`Match found in root scdata for: ${videoFile.name}`);
-
-                    let initialShortcutType = '';
-                    if (rootScEntry && typeof rootScEntry === 'string') {
-                        if (rootScEntry === 'BOTH') initialShortcutType = 'both-sc';
-                        else if (rootScEntry === 'ROOT') initialShortcutType = 'root-sc';
-                    }
-                    
-                    if (!initialShortcutType) {
-                        if (hasProjectSc && hasRootSc) initialShortcutType = 'both-sc';
-                        else if (hasProjectSc) initialShortcutType = 'subfolder-sc';
-                        else if (hasRootSc) initialShortcutType = 'root-sc';
-                    }
-
-                    const rotation = projectRotationData.get(videoFile.name.toLowerCase()) || "0";
-
-                    if ((initialShortcutType || rotation !== "0") && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') {
-                        const key = project.path + '|' + videoFile.name;
-                        const selectionData = { 
-                            videoName: videoFile.name, 
-                            projectPath: project.path,
-                            subfolder: videoFile.subfolder,
-                            type: initialShortcutType || '',
-                            rotation: rotation
-                        };
-                        shortcutSelections.set(key, selectionData);
-                        initialShortcutSelections.set(key, { type: initialShortcutType, rotation: rotation });
-                    }
-
-                    canvasElements.push(rowDiv);
-                    updateRowUI(rowDiv, videoFile.name, project.path);
-
-                    rowDiv.addEventListener('click', (e) => {
-                        // If a button was clicked, don't trigger play
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input')) {
-                            return;
-                        }
-                        const key = project.path + '|' + videoFile.name;
-                        const selection = shortcutSelections.get(key);
-                        const activeRotation = (selection && selection.rotation) ? selection.rotation : rotation;
-                        playVideo(videoFile, activeRotation);
-                    });
-
-                    files.forEach(file => {
-                        const wrapper = document.createElement('div');
-                        wrapper.className = 'thumbnail-wrapper';
-                        const img = new Image();
-                        img.className = 'thumbnail';
-                        img.dataset.fileName = file.name;
-                        if (initialShortcutType && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') {
-                            img.classList.add('selected-' + initialShortcutType);
-                        }
-                        if (rotation !== "0") {
-                            img.classList.add('rotate-' + rotation);
-                        }
-                        wrapper.appendChild(img);
-                        thumbnailsContainer.appendChild(wrapper);
-                        
-                        const promise = new Promise((resolve, reject) => {
-                            img.onload = () => {
-                                img.dataset.originalWidth = img.width;
-                                img.dataset.originalHeight = img.height;
-                                resolve();
+                            const selectionData = {
+                                videoName: videoFile.name, projectPath: project.path, subfolder: videoFile.subfolder,
+                                type: initialShortcutType || '', rotation: rotation, flipped: flipped
                             };
-                            img.onerror = reject;
+                            shortcutSelections.set(key, selectionData);
+                            initialShortcutSelections.set(key, { type: initialShortcutType, rotation: rotation, flipped: flipped });
+                        }
+
+                        canvasElements.push(rowDiv);
+                        updateRowUI(rowDiv, videoFile.name, project.path);
+
+                        rowDiv.addEventListener('click', (e) => {
+                            if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector') || e.target.closest('h3')) return;
+                            const key = project.path + '|' + videoFile.name;
+                            const selection = shortcutSelections.get(key);
+                            const activeRotation = (selection && selection.rotation) ? selection.rotation : rotation;
+                            const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                            playVideo(videoFile, activeRotation, activeFlipped);
                         });
-                        
-                        const url = URL.createObjectURL(file);
-                        createdObjectUrls.push(url);
-                        img.src = url;
-                        allImageLoadPromises.push(promise);
-                    });
-                }
-                 if (projectRows.length > 0) {
-                    const hr = document.createElement('hr');
-                    canvasElements.push(hr);
-                    canvases.set(canvasId, { id: canvasId, name: project.name, elements: canvasElements, path: project.path });
+
+                        files.forEach(file => {
+                            const wrapper = document.createElement('div');
+                            wrapper.className = 'thumbnail-wrapper';
+                            const img = new Image();
+                            img.className = 'thumbnail';
+                            img.dataset.fileName = file.name;
+                            if (initialShortcutType && currentMode !== 'playlist-root' && currentMode !== 'update-playlist-root') img.classList.add('selected-' + initialShortcutType);
+                            if (rotation !== "0") img.classList.add('rotate-' + rotation);
+                            if (flipped) img.classList.add('flipped');
+                            wrapper.appendChild(img);
+                            thumbnailsContainer.appendChild(wrapper);
+
+                            const promise = new Promise((resolve, reject) => {
+                                img.onload = () => {
+                                    img.dataset.originalWidth = img.width;
+                                    img.dataset.originalHeight = img.height;
+                                    debouncedLayout();
+                                    resolve();
+                                };
+                                img.onerror = reject;
+                            });
+                            const url = URL.createObjectURL(file);
+                            createdObjectUrls.push(url);
+                            img.src = url;
+                            allImageLoadPromises.push(promise);
+                        });
+                    }
+                    if (projectRows.length > 0) {
+                        const hr = document.createElement('hr');
+                        canvasElements.push(hr);
+                        canvases.set(canvasId, { id: canvasId, name: project.name, elements: canvasElements, path: project.path });
+                    }
+                    processedProjects++;
+                    if (!firstCanvasRendered && canvases.size > 0) {
+                        renderCanvas(canvases.keys().next().value);
+                        firstCanvasRendered = true;
+                    }
+                    if (processedProjects % 5 === 0 || processedProjects === projectFolders.length) {
+                        console.log(`Processed ${processedProjects}/${projectFolders.length} projects...`);
+                        await new Promise(r => setTimeout(r, 0)); // Yield to main thread
+                    }
+                } catch (err) {
+                    console.error(`Error processing project ${project.name}:`, err);
                 }
             }
-            await Promise.all(allImageLoadPromises);
-            if (canvases.size > 0) {
+            // Final render check in case no canvas was rendered yet
+            if (canvases.size > 0 && !firstCanvasRendered) {
                 renderCanvas(canvases.keys().next().value);
-            } else {
+            } else if (canvases.size === 0) {
                 populateCanvasDropdown(); // Ensure dropdown is cleared if no projects found
                 thumbnailContainer.innerHTML = ''; // Clear display area
             }
@@ -2372,17 +2644,21 @@
                             dateInfo.textContent = `Created: ${videoDate}`;
                             rowDiv.appendChild(dateInfo);
 
-                            const rotation = projectRotationData.get(videoBaseName.toLowerCase()) || "0";
-                            if (rotation !== "0") {
+                            const rotData = projectRotationData.get(videoBaseName.toLowerCase()) || { rotation: "0", flipped: false };
+                            const rotation = rotData.rotation;
+                            const flipped = rotData.flipped;
+
+                            if (rotation !== "0" || flipped) {
                                 const key = subfolderName + '|' + videoBaseName;
                                 if (!shortcutSelections.has(key)) {
                                     shortcutSelections.set(key, {
                                         videoName: videoBaseName,
                                         projectPath: subfolderName,
                                         type: 'subfolder-sc', // default for sc-new
-                                        rotation: rotation
+                                        rotation: rotation,
+                                        flipped: flipped
                                     });
-                                    initialShortcutSelections.set(key, { type: 'subfolder-sc', rotation: rotation });
+                                    initialShortcutSelections.set(key, { type: 'subfolder-sc', rotation: rotation, flipped: flipped });
                                 }
                             }
 
@@ -2409,7 +2685,7 @@
                              let videoFile;
                              rowDiv.addEventListener('click', async (e) => {
                                 // If a button was clicked, don't trigger play
-                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input')) {
+                                if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.move-to-selector') || e.target.closest('h3')) {
                                     return;
                                 }
                                 if (!videoFile) {
@@ -2424,7 +2700,8 @@
                                     const key = subfolderName + '|' + videoBaseName;
                                     const selection = shortcutSelections.get(key);
                                     const activeRotation = (selection && selection.rotation) ? selection.rotation : rotation;
-                                    playVideo(videoFile, activeRotation);
+                                    const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                                    playVideo(videoFile, activeRotation, activeFlipped);
                                 }
                             });
 
@@ -2437,6 +2714,9 @@
                                 img.dataset.fileName = file.name;
                                 if (rotation !== "0") {
                                     img.classList.add('rotate-' + rotation);
+                                }
+                                if (flipped) {
+                                    img.classList.add('flipped');
                                 }
                                 wrapper.appendChild(img);
                                 thumbnailsContainer.appendChild(wrapper);
@@ -2737,7 +3017,7 @@
                     };
 
                     rowDiv.addEventListener('click', async (e) => {
-                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn')) {
+                        if (e.target.closest('.bar-button') || e.target.closest('.delete-cross') || e.target.closest('.multiplier-input') || e.target.closest('.playlist-nav-btn') || e.target.closest('.move-to-selector') || e.target.closest('h3')) {
                             return;
                         }
                         const video = candidateVideos[currentIndex];
@@ -2745,7 +3025,8 @@
                         const key = project.path + '|playlist_entry';
                         const selection = shortcutSelections.get(key);
                         const activeRotation = (selection && selection.rotation) ? selection.rotation : "0";
-                        playVideo(videoFile, activeRotation);
+                        const activeFlipped = (selection && selection.flipped) ? selection.flipped : false;
+                        playVideo(videoFile, activeRotation, activeFlipped);
                     });
 
                     const rowHeader = document.createElement('h3');
@@ -3010,10 +3291,10 @@
             scriptLines.push('Write-Host "Total items in playlist: \$(\$script:playlistContent.Count - 1)"');
             scriptLines.push('Read-Host -Prompt "Press Enter to exit"');
 
-            const script = scriptLines.join('\r\n');
-            batchScriptTextArea.value = script;
-            const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
-            downloadScriptLink.href = URL.createObjectURL(blob);
+            const scriptStrP = scriptLines.join('\r\n');
+            batchScriptTextArea.value = scriptStrP;
+            const blobP = new Blob(['\ufeff', scriptStrP], { type: 'application/octet-stream' });
+            downloadScriptLink.href = URL.createObjectURL(blobP);
             downloadScriptLink.download = 'create_playlist.ps1';
         }
 
